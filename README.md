@@ -6,7 +6,7 @@ An end-to-end fraud detection system that flags anomalous transactions, explains
 
 Most LLM explainability demos have no ground truth. This project uses SHAP values as ground truth for the LLM explanation, quantifying how often the model hallucinates a reason versus accurately reflecting feature attribution. The result is a measurable, reproducible faithfulness score per explanation.
 
-**Key finding:** An unconstrained LLM prompt hallucinated a plausible-but-wrong reason in ~11% of cases. Constraining the prompt to cite only the top 3 SHAP features by magnitude improved faithfulness from ~89% to ~97%.
+**Key finding:** An unconstrained LLM prompt hallucinated a feature concept not in the SHAP top-3 in 16% of cases, and got the risk direction wrong 12% of the time. Constraining the prompt to explicitly cite only the top-3 SHAP features reduced hallucination to 4% and improved direction accuracy from 87.9% to 99.1%.
 
 ## Architecture
 
@@ -34,16 +34,19 @@ Raw Transaction
 
 ## Results
 
-| Metric | Value |
-|--------|-------|
-| Model ROC-AUC | > 0.92 (target) |
-| Precision@1000 | > 0.60 (target) |
-| Faithfulness v1 (unconstrained prompt) | ~0.70-0.80 |
-| Faithfulness v2 (constrained prompt) | > 0.95 (target) |
-| API p99 latency | < 200ms (target) |
-| Drift detection lag | < 10 min |
+| Metric | Value | Notes |
+|--------|-------|-------|
+| Model ROC-AUC (val / test) | 0.909 / 0.869 | Val-test gap reflects temporal drift |
+| Precision@1000 (test) | 0.838 | 83.8% of top-1000 scored are actual fraud |
+| F1 at operating threshold (test) | 0.497 | Threshold tuned on val set |
+| Faithfulness v1 - direction accuracy | 0.879 | Unconstrained prompt |
+| Faithfulness v1 - hallucination rate | 0.160 | 1 in 6 explanations introduce wrong features |
+| Faithfulness v2 - direction accuracy | 0.991 | Constrained prompt |
+| Faithfulness v2 - hallucination rate | 0.040 | 1 in 25 explanations |
+| API p99 latency | < 200ms (target) | Pending Phase 5 |
+| Drift detection lag | < 10 min (target) | Pending Phase 4 |
 
-*Results will be updated as phases complete.*
+*Evaluated on 50 flagged test-set transactions. API and drift metrics pending implementation.*
 
 ## Tech Stack
 
@@ -83,20 +86,21 @@ transaction-anomaly-explainer/
 │   ├── processed/              # Engineered parquet files (gitignored)
 │   └── streaming/              # Simulated drift stream
 ├── notebooks/
-│   ├── 01_eda.ipynb            # Exploratory analysis
-│   ├── 02_feature_engineering.ipynb  # Pipeline validation + leakage check
-│   └── 03_model_selection.ipynb
+│   ├── 01_eda.ipynb                    # Exploratory analysis
+│   ├── 02_feature_engineering.ipynb    # Pipeline validation + leakage check
+│   └── 03_llm_faithfulness_eval.ipynb  # LLM explanation + faithfulness experiment
 ├── src/
 │   ├── features/
-│   │   └── build_features.py   # Full feature engineering pipeline
+│   │   └── build_features.py           # Full feature engineering pipeline
 │   ├── models/
-│   │   ├── train.py            # LightGBM training + MLflow logging
-│   │   ├── evaluate.py         # AUC, F1, Precision@k
-│   │   └── shap_utils.py       # SHAP computation helpers
+│   │   ├── train.py                    # LightGBM training + MLflow logging
+│   │   ├── evaluate.py                 # AUC, F1, Precision@k
+│   │   └── shap_utils.py               # SHAP computation helpers
 │   ├── explainability/
-│   │   ├── llm_explainer.py    # LiteLLM wrapper + prompt templates
-│   │   ├── faithfulness_eval.py # Faithfulness scoring (the core differentiator)
-│   │   └── prompts.py          # Prompt v1 (unconstrained) and v2 (constrained)
+│   │   ├── llm_explainer.py            # LiteLLM wrapper (Ollama/OpenAI)
+│   │   ├── faithfulness_eval.py        # Faithfulness scoring (core differentiator)
+│   │   ├── prompts.py                  # Prompt v1 (unconstrained) and v2 (constrained)
+│   │   └── run_faithfulness_eval.py    # Eval runner with checkpointing
 │   ├── drift/
 │   │   ├── monitor.py          # Evidently PSI monitor
 │   │   ├── retrain_trigger.py  # FastAPI BackgroundTasks retraining
@@ -191,8 +195,8 @@ The API maintains an in-memory card state store (`feature_store.py`) that tracks
 ## Implementation Phases
 
 - [x] Phase 1: Data & Feature Engineering
-- [ ] Phase 2: Model Training + SHAP
-- [ ] Phase 3: LLM Explanation Layer + Faithfulness Eval
+- [x] Phase 2: Model Training + SHAP
+- [x] Phase 3: LLM Explanation Layer + Faithfulness Eval
 - [ ] Phase 4: Drift Detection + Retraining Pipeline
 - [ ] Phase 5: FastAPI Backend
 - [ ] Phase 6: React Dashboard

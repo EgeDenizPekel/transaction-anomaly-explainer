@@ -7,6 +7,8 @@ data/streaming/
 
 # MLflow artifacts
 mlflow/mlruns/
+mlflow/*.db
+mlruns/
 
 # Python
 __pycache__/

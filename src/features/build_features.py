@@ -262,6 +262,18 @@ def encode_categoricals(
         for split in [train, val, test]:
             split[col] = split[col].map(encoding_map).fillna(global_mean).astype(np.float32)
 
+    # Fallback: label-encode any remaining object columns not in the explicit lists
+    remaining_obj = [c for c in train.select_dtypes(include="object").columns
+                     if c not in {"isFraud", "_DeviceInfo_raw"}]
+    if remaining_obj:
+        log.info(f"  Fallback label-encoding {len(remaining_obj)} remaining object cols: {remaining_obj}")
+        for col in remaining_obj:
+            for split in [train, val, test]:
+                split[col] = split[col].fillna(MISSING_CAT).astype(str)
+            codes = {v: i for i, v in enumerate(sorted(train[col].unique()))}
+            for split in [train, val, test]:
+                split[col] = split[col].map(codes).fillna(-1).astype(np.int16)
+
     log.info("Categorical encoding done.")
     return train, val, test
 
