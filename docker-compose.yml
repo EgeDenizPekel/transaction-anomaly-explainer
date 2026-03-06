@@ -1,0 +1,39 @@
+version: "3.9"
+
+services:
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    ports:
+      - "8000:8000"
+    environment:
+      - MLFLOW_TRACKING_URI=sqlite:///mlflow/mlruns.db
+      - LLM_PROVIDER=${LLM_PROVIDER:-ollama}
+      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      - OLLAMA_MODEL=${OLLAMA_MODEL:-ollama/llama3.1:8b}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - OPENAI_MODEL=${OPENAI_MODEL:-gpt-4o-mini}
+    volumes:
+      # Model artifacts and tracking DB
+      - ./mlflow:/app/mlflow
+      # Processed features for drift reference + retrain
+      - ./data:/app/data
+    depends_on:
+      - mlflow
+    restart: unless-stopped
+
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:v2.13.0
+    ports:
+      - "5000:5000"
+    command: >
+      mlflow server
+      --host 0.0.0.0
+      --port 5000
+      --backend-store-uri sqlite:///mlflow/mlruns.db
+      --default-artifact-root /mlflow/artifacts
+    volumes:
+      - ./mlflow:/mlflow
+    restart: unless-stopped

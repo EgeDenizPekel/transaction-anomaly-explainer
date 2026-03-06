@@ -44,9 +44,11 @@ Raw Transaction
 | Faithfulness v2 - direction accuracy | 0.991 | Constrained prompt |
 | Faithfulness v2 - hallucination rate | 0.040 | 1 in 25 explanations |
 | API p99 latency | < 200ms (target) | Pending Phase 5 |
-| Drift detection lag | < 10 min (target) | Pending Phase 4 |
+| Drift detection lag | 1 batch (1,000 tx) | Simulated stream - see note below |
 
-*Evaluated on 50 flagged test-set transactions. API and drift metrics pending implementation.*
+*Evaluated on 50 flagged test-set transactions.*
+
+**Note on drift metrics**: The drift demo uses a synthetic concept drift stream generated from test-set data. In the post-drift segment, `txn_velocity_1h` is scaled 4x, `hour_of_day` is biased toward 0-5 AM, and fraud labels are reassigned so that high-velocity + odd-hour transactions are fraud with 80% probability (replacing the original high-amount + new-device pattern). This exaggeration is intentional: 6 batches of 1,000 transactions each produce a clear F1 degradation and recovery chart. Real concept drift is gradual and requires much larger observation windows to detect.
 
 ## Tech Stack
 
@@ -88,7 +90,8 @@ transaction-anomaly-explainer/
 ├── notebooks/
 │   ├── 01_eda.ipynb                    # Exploratory analysis
 │   ├── 02_feature_engineering.ipynb    # Pipeline validation + leakage check
-│   └── 03_llm_faithfulness_eval.ipynb  # LLM explanation + faithfulness experiment
+│   ├── 03_llm_faithfulness_eval.ipynb  # LLM explanation + faithfulness experiment
+│   └── 04_drift_analysis.ipynb         # Drift detection + retrain + F1 recovery chart
 ├── src/
 │   ├── features/
 │   │   └── build_features.py           # Full feature engineering pipeline
@@ -197,7 +200,7 @@ The API maintains an in-memory card state store (`feature_store.py`) that tracks
 - [x] Phase 1: Data & Feature Engineering
 - [x] Phase 2: Model Training + SHAP
 - [x] Phase 3: LLM Explanation Layer + Faithfulness Eval
-- [ ] Phase 4: Drift Detection + Retraining Pipeline
-- [ ] Phase 5: FastAPI Backend
-- [ ] Phase 6: React Dashboard
+- [x] Phase 4: Drift Detection + Retraining Pipeline
+- [x] Phase 5: FastAPI Backend
+- [x] Phase 6: React Dashboard
 - [ ] Phase 7: Deployment

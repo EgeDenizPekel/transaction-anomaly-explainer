@@ -1,0 +1,20 @@
+FROM python:3.10-slim
+
+WORKDIR /app
+
+# Install dependencies first (layer cached unless requirements.txt changes)
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy source code
+COPY src/ src/
+
+# mlflow dir is mounted as a volume at runtime so the model artifact is available
+# data/processed is also mounted so val.parquet loads for drift reference
+
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONPATH=/app
+
+EXPOSE 8000
+
+CMD ["uvicorn", "src.api.main:app", "--host", "0.0.0.0", "--port", "8000"]
