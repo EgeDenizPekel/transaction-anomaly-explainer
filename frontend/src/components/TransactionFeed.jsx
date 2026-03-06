@@ -115,14 +115,19 @@ export default function TransactionFeed({ onSelect, selectedId }) {
       {/* Transaction list */}
       <div className="flex-1 overflow-y-auto space-y-1.5 pr-1">
         {loading && (
-          <p className="text-gray-500 text-sm">Connecting to API...</p>
+          <div className="flex items-center gap-2 text-gray-500 text-sm">
+            <span className="w-2 h-2 rounded-full bg-gray-500 animate-pulse inline-block" />
+            Connecting to API...
+          </div>
         )}
-        {!loading && filtered.length === 0 && (
-          <p className="text-gray-500 text-sm">
-            {transactions.length === 0
-              ? 'Waiting for seeder (may take a few seconds)...'
-              : `No ${filter} transactions in current window.`}
-          </p>
+        {!loading && transactions.length === 0 && (
+          <div className="flex items-center gap-2 text-gray-500 text-sm">
+            <span className="w-2 h-2 rounded-full bg-blue-500 animate-pulse inline-block" />
+            Seeder starting up...
+          </div>
+        )}
+        {!loading && transactions.length > 0 && filtered.length === 0 && (
+          <p className="text-gray-500 text-sm">No {filter} transactions in current window.</p>
         )}
         {filtered.map(tx => (
           <button

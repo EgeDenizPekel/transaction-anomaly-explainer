@@ -64,6 +64,7 @@ async def lifespan(app: FastAPI):
     registry.load()
 
     # Derive feature columns + set up drift monitor from validation set
+    app.state.calibration = None
     if VAL_PATH.exists():
         val_df = pd.read_parquet(VAL_PATH)
         registry.feature_cols = get_feature_cols(val_df)
@@ -80,6 +81,27 @@ async def lifespan(app: FastAPI):
             log.info(f"Drift monitor on {len(monitor_features)} features")
         else:
             app.state.drift_monitor = None
+
+        # Compute calibration metrics from val set
+        if "isFraud" in val_df.columns:
+            try:
+                import numpy as np
+                from src.models.calibration import compute_brier_score, reliability_diagram_data
+                X_val = val_df[registry.feature_cols]
+                y_val = val_df["isFraud"].values.astype(int)
+                val_probs = registry.model.predict_proba(X_val)[:, 1]
+                base_rate = float(y_val.mean())
+                brier = compute_brier_score(y_val, val_probs)
+                app.state.calibration = {
+                    "brier_score": round(brier, 6),
+                    "baseline_brier": round(base_rate * (1 - base_rate), 6),
+                    "n_val_samples": int(len(y_val)),
+                    "reliability_diagram": reliability_diagram_data(y_val, val_probs),
+                }
+                registry._val_roc_auc = registry._val_roc_auc  # already set
+                log.info(f"Calibration: Brier={brier:.4f} baseline={base_rate*(1-base_rate):.4f}")
+            except Exception as e:
+                log.warning(f"Calibration computation failed: {e}")
     else:
         log.warning(f"Val parquet not found at {VAL_PATH} - drift monitor disabled")
         app.state.drift_monitor = None

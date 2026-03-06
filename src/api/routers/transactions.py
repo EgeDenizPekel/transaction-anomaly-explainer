@@ -20,7 +20,10 @@ sys.path.insert(0, str(ROOT))
 
 from src.api.feature_store import feature_store
 from src.api.model_registry import registry
-from src.api.schemas import ExplainRequest, ExplainResponse, ScoreResponse, TopFeature, TransactionRecord, TransactionRequest
+from src.api.schemas import (
+    CounterfactualFeature, ExplainRequest, ExplainResponse,
+    ScoreResponse, TopFeature, TransactionRecord, TransactionRequest,
+)
 from src.explainability.llm_explainer import generate_explanation
 from src.models.shap_utils import compute_shap_values, top_k_features
 
@@ -116,9 +119,11 @@ def score_transaction(request_body: TransactionRequest, request: Request):
     is_flagged = score >= registry.threshold
     alert_level = _alert_level(score)
 
-    # SHAP + explanation for flagged transactions only
+    # SHAP + explanation + optional stability/counterfactuals for flagged transactions
     top_feats: list[dict] = []
     explanation: str | None = None
+    stability_score: float | None = None
+    counterfactuals_raw: list[dict] = []
 
     if is_flagged:
         try:
@@ -128,6 +133,22 @@ def score_transaction(request_body: TransactionRequest, request: Request):
                 explanation = generate_explanation(score, top_feats, prompt_version="v2")
         except Exception as e:
             log.warning(f"SHAP/LLM error for {request_body.transaction_id}: {e}")
+
+        if request_body.compute_stability and top_feats:
+            try:
+                from src.models.shap_utils import attribution_stability
+                stability_score = attribution_stability(registry.explainer, X, feature_cols)
+            except Exception as e:
+                log.warning(f"Stability error for {request_body.transaction_id}: {e}")
+
+        if request_body.compute_counterfactuals and top_feats:
+            try:
+                from src.explainability.counterfactuals import find_counterfactuals
+                counterfactuals_raw = find_counterfactuals(
+                    registry.model, X, registry.threshold, top_feats
+                )
+            except Exception as e:
+                log.warning(f"Counterfactuals error for {request_body.transaction_id}: {e}")
 
     # Update card state store AFTER scoring
     feature_store.update(card_id, amount, device_info, transaction_dt)
@@ -143,6 +164,8 @@ def score_transaction(request_body: TransactionRequest, request: Request):
         "timestamp_dt": transaction_dt,
         "top_features": top_feats,
         "explanation": explanation,
+        "counterfactuals": counterfactuals_raw,
+        "stability_score": stability_score,
     }
     feature_row = {k: float(X[k].iloc[0]) for k in feature_cols}
 
@@ -169,6 +192,8 @@ def score_transaction(request_body: TransactionRequest, request: Request):
         explanation=explanation,
         model_version=registry.version,
         latency_ms=round(latency_ms, 1),
+        stability_score=stability_score,
+        counterfactuals=[CounterfactualFeature(**c) for c in counterfactuals_raw],
     )
 
 
@@ -177,10 +202,15 @@ def explain_transaction(body: ExplainRequest):
     """
     Generate an LLM explanation for a flagged transaction given its SHAP top features.
     Calls the constrained v2 prompt which cites only the provided SHAP features.
+    Returns 503 if the LLM provider is unavailable.
     """
-    top_feats = [f.model_dump() for f in body.top_features]
-    explanation = generate_explanation(body.anomaly_score, top_feats, prompt_version="v2")
-    return ExplainResponse(transaction_id=body.transaction_id, explanation=explanation)
+    try:
+        top_feats = [f.model_dump() for f in body.top_features]
+        explanation = generate_explanation(body.anomaly_score, top_feats, prompt_version="v2")
+        return ExplainResponse(transaction_id=body.transaction_id, explanation=explanation)
+    except Exception as e:
+        log.error(f"LLM explain failed for {body.transaction_id}: {e}")
+        raise HTTPException(status_code=503, detail=str(e))
 
 
 @router.get("/transactions", response_model=list[TransactionRecord])

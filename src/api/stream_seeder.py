@@ -92,6 +92,8 @@ def _run_seeder(app) -> None:
             y_true: list[int] = []
             y_pred: list[int] = []
             feature_rows: list[dict] = []
+            batch_top_feat_counts: dict[str, int] = {}
+            n_flagged_batch = 0
 
             for idx, row in batch.iterrows():
                 try:
@@ -104,14 +106,28 @@ def _run_seeder(app) -> None:
                     feat_row = {col: float(X[col].iloc[0]) for col in feature_cols}
                     feature_rows.append(feat_row)
 
-                    # Compute SHAP for flagged transactions (only ~2-3% of stream)
+                    # Compute SHAP + counterfactuals for flagged transactions (only ~2-3% of stream)
                     top_feats = []
+                    counterfactuals_raw = []
                     if is_flagged:
+                        n_flagged_batch += 1
                         try:
                             shap_vals = compute_shap_values(registry.explainer, X)[0]
                             top_feats = top_k_features(shap_vals, feature_cols, X.values[0], k=3)
+                            # Track which features dominate explanations per batch
+                            for f in top_feats:
+                                fname = f["feature"]
+                                batch_top_feat_counts[fname] = batch_top_feat_counts.get(fname, 0) + 1
                         except Exception as e:
                             log.warning(f"Seeder SHAP error row {idx}: {e}")
+
+                        try:
+                            from src.explainability.counterfactuals import find_counterfactuals
+                            counterfactuals_raw = find_counterfactuals(
+                                registry.model, X, registry.threshold, top_feats
+                            )
+                        except Exception as e:
+                            log.warning(f"Seeder counterfactuals error row {idx}: {e}")
 
                     app.state.recent_transactions.appendleft({
                         "transaction_id": f"stream_b{batch_id}_{idx}",
@@ -122,6 +138,8 @@ def _run_seeder(app) -> None:
                         "timestamp_dt": float(row["TransactionDT"]) if "TransactionDT" in row.index and pd.notna(row["TransactionDT"]) else None,
                         "top_features": top_feats,
                         "explanation": None,
+                        "counterfactuals": counterfactuals_raw,
+                        "stability_score": None,
                     })
                     app.state.n_scored += 1
                     if is_flagged:
@@ -166,14 +184,22 @@ def _run_seeder(app) -> None:
                 except Exception as e:
                     log.warning(f"Seeder drift check error batch {batch_id}: {e}")
 
+            # Clear history only now (after batch 0 finishes) so the previous
+            # loop's chart stays visible during the ~100s gap while batch 0 runs
+            if batch_id == 0 and loop > 1:
+                app.state.batch_metrics_history.clear()
+                app.state.drift_history.clear()
+
             app.state.batch_metrics_history.append({
                 "batch_id": int(batch_id),
                 "is_post_drift": is_post_drift,
                 "f1": round(batch_f1, 4),
                 "fraud_rate": round(fraud_rate, 4),
                 "n_transactions": len(batch),
+                "n_flagged_batch": n_flagged_batch,
                 "drift_detected": drift_result.get("drift_detected", False),
                 "drifted_features": drift_result.get("drifted_features", []),
+                "top_feature_counts": batch_top_feat_counts,
                 "recorded_at": datetime.now(timezone.utc).isoformat(),
             })
             log.info(

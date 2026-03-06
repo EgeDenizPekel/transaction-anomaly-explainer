@@ -2,22 +2,40 @@
 Faithfulness evaluation framework.
 
 Measures whether an LLM-generated explanation faithfully reflects the SHAP
-feature attribution used as ground truth.
+feature attribution. SHAP is used as the reference attribution signal - not
+as philosophical "ground truth" (SHAP itself has assumptions under feature
+correlation), but as the most principled available attribution for tree models
+and the signal we explicitly provide to the LLM.
 
-Two eval contexts (per design decision):
+Three eval contexts:
 
   v1 (unconstrained prompt):
-    - mention_rate:      fraction of top-3 SHAP features referenced in the explanation
+    - mention_rate:       fraction of top-3 SHAP features referenced in the explanation
     - direction_accuracy: fraction of mentioned features with correct risk direction
+    - rank_fidelity:      whether mention order preserves SHAP importance ordering
+    - failure_types:      taxonomy of failures (wrong_sign, omitted_top_driver, etc.)
 
   v2 (constrained prompt):
-    - mention_rate is trivially ~1.0 by prompt design - not reported as a signal
+    - mention_rate is trivially ~1.0 by prompt design - not reported as a primary signal
     - direction_accuracy: fraction of features with correct risk direction
-    - value_accuracy:    fraction of features where the numeric value appears in explanation
-    - hallucination_rate: fraction of explanations introducing feature names not in top-3
+    - value_accuracy:     fraction of features where the numeric value appears
+    - hallucination_rate: fraction of explanations introducing feature domains not in top-3
+    - rank_fidelity:      whether mention order preserves SHAP importance ordering
+    - failure_types:      taxonomy of failures
 
-composite_faithfulness (reported for both):
-    direction_accuracy * (mention_rate for v1, 1.0 for v2)
+  template (non-LLM baseline, from template_explainer.py):
+    - hallucination_rate is always 0.0 by construction
+    - mention_rate is always 1.0 by construction
+    - Serves as the minimum bar LLM explanations must clear on faithfulness
+
+composite_faithfulness (reported for all):
+    direction_accuracy * (mention_rate for v1, 1.0 for v2/template)
+
+Failure taxonomy:
+  - "wrong_sign":         A mentioned feature has incorrect risk direction stated.
+  - "omitted_top_driver": The top-ranked SHAP feature (highest |SHAP|) was not mentioned.
+  - "unsupported_domain": A feature domain outside the top-3 was introduced (hallucination).
+  - "none":               No failures detected.
 """
 
 import re
@@ -134,6 +152,106 @@ def _value_present(explanation: str, feature_value: float) -> bool:
     return False
 
 
+def _get_mention_position(text: str, feature: str) -> int:
+    """Return the character position of the first mention of a feature (or alias). -1 if not mentioned."""
+    name = feature.lower()
+    if name in text:
+        return text.index(name)
+
+    feature_key = name.replace("_", "").replace(" ", "")
+    aliases = {
+        "transactionamt": ["amount", "transaction amount", "amt"],
+        "transactionamt_zscore": ["z-score", "zscore", "standard deviation", "sigma", "unusual amount"],
+        "transactionamt_log": ["amount", "transaction amount"],
+        "amt_to_mean_ratio": ["ratio", "mean"],
+        "card_amt_std": ["variability", "standard deviation", "volatility"],
+        "card_amt_mean": ["average", "mean", "typical amount"],
+        "txn_velocity_1h": ["velocity", "frequency", "rapid", "multiple", "hour"],
+        "time_since_last_txn": ["interval", "gap", "last transaction", "recently"],
+        "is_new_device": ["device", "unfamiliar", "first time", "never seen"],
+        "has_identity": ["identity", "verified"],
+        "hour_of_day": ["hour", "time of day", "night", "morning", "evening"],
+        "day_of_week": ["day", "weekend", "weekday"],
+        "card1": ["card", "account"],
+        "card2": ["card", "account"],
+    }
+    for key, alias_list in aliases.items():
+        if key == feature_key or key in name:
+            for alias in alias_list:
+                if alias in text:
+                    return text.index(alias)
+    return -1
+
+
+def rank_fidelity(explanation: str, top_features: list[dict]) -> float | None:
+    """
+    Measure whether the explanation preserves the SHAP importance ordering.
+
+    For each consecutive pair of features (sorted by |SHAP| descending),
+    check if the more important feature appears earlier (or at the same position)
+    in the explanation text. Returns the fraction of correctly ordered pairs.
+
+    Returns None if fewer than 2 features are mentioned (not assessable).
+    """
+    text = _normalize(explanation)
+    features = top_features[:3]
+
+    positions = {}
+    for f in features:
+        pos = _get_mention_position(text, f["feature"])
+        if pos >= 0:
+            positions[f["feature"]] = pos
+
+    mentioned = [f for f in features if f["feature"] in positions]
+    if len(mentioned) < 2:
+        return None
+
+    correct_pairs = 0
+    total_pairs = 0
+    for i in range(len(mentioned) - 1):
+        fi = mentioned[i]["feature"]
+        fj = mentioned[i + 1]["feature"]
+        if fi in positions and fj in positions:
+            total_pairs += 1
+            if positions[fi] <= positions[fj]:
+                correct_pairs += 1
+
+    return round(correct_pairs / total_pairs, 4) if total_pairs > 0 else None
+
+
+def classify_failure(
+    explanation: str,
+    top_features: list[dict],
+    direction_accuracy: float | None,
+    hallucinated: bool,
+) -> list[str]:
+    """
+    Classify explanation failures into a taxonomy.
+
+    Failure types (non-exclusive):
+      - "wrong_sign":         A mentioned feature has incorrect risk direction.
+      - "omitted_top_driver": Top-ranked SHAP feature (highest |SHAP|) not mentioned.
+      - "unsupported_domain": A feature domain not in top-3 was introduced (hallucination).
+      - "none":               No failures detected.
+
+    Returns list of failure strings. Empty list means no failures (equivalent to ["none"]).
+    """
+    failures = []
+
+    if hallucinated:
+        failures.append("unsupported_domain")
+
+    if top_features:
+        top_feature = top_features[0]  # highest |SHAP| = most important
+        if not _feature_mentioned(explanation, top_feature["feature"]):
+            failures.append("omitted_top_driver")
+
+    if direction_accuracy is not None and direction_accuracy < 1.0:
+        failures.append("wrong_sign")
+
+    return failures if failures else ["none"]
+
+
 def _hallucination_check(explanation: str, top_features: list[dict]) -> bool:
     """
     Returns True if the explanation introduces a feature concept NOT present
@@ -223,15 +341,21 @@ def compute_faithfulness(
 
     hallucinated = _hallucination_check(explanation, features)
 
-    # Composite: for v1 weight by mention_rate; for v2 assume mention=1.0
+    # Composite: for v1 weight by mention_rate; for v2/v3/template assume mention=1.0
     da = direction_accuracy if direction_accuracy is not None else 0.0
     composite = mention_rate * da if prompt_version == "v1" else da
+
+    # New metrics
+    rf = rank_fidelity(explanation, features)
+    failures = classify_failure(explanation, features, direction_accuracy, hallucinated)
 
     return {
         "mention_rate": round(mention_rate, 4),
         "direction_accuracy": round(direction_accuracy, 4) if direction_accuracy is not None else None,
         "value_accuracy": round(value_accuracy, 4) if value_accuracy is not None else None,
+        "rank_fidelity": round(rf, 4) if rf is not None else None,
         "hallucinated": hallucinated,
+        "failure_types": failures,
         "composite_faithfulness": round(composite, 4),
         "prompt_version": prompt_version,
     }
@@ -260,8 +384,17 @@ def evaluate_batch(
     mention_rates      = [r["mention_rate"] for r in results]
     direction_accs     = [r["direction_accuracy"] for r in results if r["direction_accuracy"] is not None]
     value_accs         = [r["value_accuracy"] for r in results if r["value_accuracy"] is not None]
+    rank_fidelities    = [r["rank_fidelity"] for r in results if r["rank_fidelity"] is not None]
     composites         = [r["composite_faithfulness"] for r in results]
     hallucination_rate = sum(r["hallucinated"] for r in results) / len(results)
+
+    # Failure type frequencies
+    all_failures: list[str] = []
+    for r in results:
+        all_failures.extend(r.get("failure_types", ["none"]))
+    failure_counts = {}
+    for f in all_failures:
+        failure_counts[f] = failure_counts.get(f, 0) + 1
 
     def safe_mean(lst):
         return round(sum(lst) / len(lst), 4) if lst else None
@@ -272,7 +405,9 @@ def evaluate_batch(
         "mean_mention_rate": safe_mean(mention_rates),
         "mean_direction_accuracy": safe_mean(direction_accs),
         "mean_value_accuracy": safe_mean(value_accs),
+        "mean_rank_fidelity": safe_mean(rank_fidelities),
         "mean_composite_faithfulness": safe_mean(composites),
         "hallucination_rate": round(hallucination_rate, 4),
+        "failure_type_counts": failure_counts,
         "individual": results,
     }

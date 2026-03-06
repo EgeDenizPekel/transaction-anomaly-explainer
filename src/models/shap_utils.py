@@ -90,6 +90,66 @@ def explanation_contract(
     }
 
 
+def _spearman_rank_corr(a: np.ndarray, b: np.ndarray) -> float:
+    """Spearman rank correlation using numpy (no scipy dependency)."""
+    n = len(a)
+    if n < 2:
+        return 1.0
+    rank_a = np.argsort(np.argsort(a)).astype(float)
+    rank_b = np.argsort(np.argsort(b)).astype(float)
+    d = rank_a - rank_b
+    denom = n * (n**2 - 1)
+    if denom == 0:
+        return 1.0
+    return float(1 - 6 * np.sum(d**2) / denom)
+
+
+def attribution_stability(
+    explainer: shap.TreeExplainer,
+    X: pd.DataFrame,
+    feature_cols: list[str],
+    n_perturbations: int = 5,
+    noise_fraction: float = 0.05,
+) -> float:
+    """
+    Measure SHAP attribution stability under small feature perturbations.
+
+    Perturbs each numeric feature by Gaussian noise (std = noise_fraction * |value|),
+    re-computes SHAP, and measures Spearman rank correlation between original and
+    perturbed feature importances. Returns the mean rank correlation.
+
+    Range: 0.0 (completely unstable) to 1.0 (perfectly stable).
+    High stability (>= 0.85) means the top-3 ranking is robust to small input changes.
+    Low stability (<= 0.6) means the explanation is sensitive to minor feature variations
+    and should be interpreted with caution.
+
+    Note: This adds multiple SHAP evaluations per transaction - use only when the
+    stability information is needed (e.g. the constrained v2/v3 prompt is active).
+    """
+    original_shap = compute_shap_values(explainer, X)[0]
+    original_importance = np.abs(original_shap)
+
+    rng = np.random.default_rng(42)
+    correlations = []
+
+    for _ in range(n_perturbations):
+        X_perturbed = X.copy()
+        for col in feature_cols:
+            val = float(X_perturbed[col].iloc[0])
+            if val not in (-999.0, 0.0):
+                noise = rng.normal(0, abs(val) * noise_fraction + 1e-6)
+                X_perturbed[col] = val + noise
+
+        perturbed_shap = compute_shap_values(explainer, X_perturbed)[0]
+        perturbed_importance = np.abs(perturbed_shap)
+
+        corr = _spearman_rank_corr(original_importance, perturbed_importance)
+        if not np.isnan(corr):
+            correlations.append(corr)
+
+    return round(float(np.mean(correlations)) if correlations else 0.0, 4)
+
+
 def _alert_level(score: float) -> str:
     if score >= 0.75:
         return "HIGH"

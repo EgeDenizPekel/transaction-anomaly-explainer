@@ -54,3 +54,4 @@ frontend/.env
 locust_report*.html
 agent.instructions.md
 project-plan-anomaly-explainer.md
+project.self.learning.material.md

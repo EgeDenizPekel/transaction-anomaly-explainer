@@ -6,6 +6,32 @@ const DIRECTION_COLOR = {
   decreases_risk: '#22c55e',
 }
 
+function formatFeatureValue(feature, value) {
+  if (value === -999) return 'missing'
+  switch (feature) {
+    case 'time_since_last_txn':
+      if (value < 0) return 'N/A'
+      if (value < 60) return `${value.toFixed(0)}s`
+      if (value < 3600) return `${(value / 60).toFixed(1)} min`
+      if (value < 86400) return `${(value / 3600).toFixed(1)} hrs`
+      return `${(value / 86400).toFixed(1)} days`
+    case 'txn_velocity_1h':
+      return `${value.toFixed(0)} txns/hr`
+    case 'TransactionAmt':
+    case 'card_amt_mean':
+    case 'card_amt_std':
+      return `$${value.toFixed(2)}`
+    case 'TransactionAmt_zscore':
+      return `${value.toFixed(2)}σ`
+    case 'hour_of_day':
+      return `${value.toFixed(0)}:00`
+    case 'is_new_device':
+      return value >= 0.5 ? 'yes' : 'no'
+    default:
+      return value.toFixed(4)
+  }
+}
+
 const ALERT_BADGE = {
   HIGH: 'bg-red-500 text-white',
   MEDIUM: 'bg-yellow-500 text-gray-900',
@@ -37,6 +63,8 @@ export default function AlertDetail({ transaction }) {
   const topFeatures = transaction.top_features ?? []
   const maxAbs = Math.max(...topFeatures.map(f => Math.abs(f.shap_value)), 0.001)
   const displayExplanation = explanation ?? transaction.explanation
+  const counterfactuals = transaction.counterfactuals ?? []
+  const stabilityScore = transaction.stability_score ?? null
 
   async function handleExplain() {
     if (!topFeatures.length) return
@@ -66,7 +94,7 @@ export default function AlertDetail({ transaction }) {
     <div className="bg-gray-900 rounded-lg p-4 overflow-y-auto">
       <div className="flex items-center gap-2 mb-3">
         <h2 className="text-base font-semibold text-white">Alert Detail</h2>
-        <Tooltip text="SHAP (Shapley) values show which features drove this prediction. Bar width = relative magnitude. Red = increases fraud risk, green = decreases it. Click Generate to call the LLM for a natural-language explanation grounded in these SHAP values." />
+        <Tooltip text="SHAP (Shapley) values show which model attribution signals drove this risk score. Bar width = relative magnitude. Red = increases risk score, green = decreases it. SHAP is the reference attribution signal (not causal ground truth). Click Generate to call the LLM for a natural-language summary grounded in these attribution values." />
       </div>
 
       {/* Summary row */}
@@ -106,7 +134,7 @@ export default function AlertDetail({ transaction }) {
                     />
                   </div>
                   <div className="text-xs text-gray-600 mt-0.5">
-                    processed value: {f.feature_value.toFixed(4)}
+                    value: {formatFeatureValue(f.feature, f.feature_value)}
                   </div>
                 </div>
               )
@@ -127,6 +155,50 @@ export default function AlertDetail({ transaction }) {
         </p>
       )}
 
+      {/* Counterfactuals */}
+      {counterfactuals.length > 0 && (
+        <div className="mb-4">
+          <div className="flex items-center gap-2 mb-2">
+            <h3 className="text-sm font-semibold text-gray-300">What Would Change It?</h3>
+            <Tooltip text="Single-feature counterfactuals: the minimum change to each risk-increasing feature that would drop the model score below the decision threshold (if achievable). Single-feature only - real fraud patterns may require multiple features to jointly change." />
+          </div>
+          <div className="space-y-1.5">
+            {counterfactuals.map(cf => (
+              <div key={cf.feature} className="bg-gray-800 rounded px-3 py-2 text-xs">
+                <div className="flex justify-between items-center">
+                  <span className="font-mono text-gray-300">{cf.feature}</span>
+                  <span className="text-orange-400 font-semibold">{cf.pct_change.toFixed(1)}%</span>
+                </div>
+                <div className="text-gray-500 mt-0.5">
+                  {formatFeatureValue(cf.feature, cf.current_value)} &rarr; {formatFeatureValue(cf.feature, cf.counterfactual_value)}
+                  <span className="ml-2 text-gray-600">(score: {(cf.score_after * 100).toFixed(1)}%)</span>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Attribution stability */}
+      {stabilityScore !== null && (
+        <div className="mb-4">
+          <div className="flex items-center gap-2 mb-1">
+            <h3 className="text-sm font-semibold text-gray-300">Attribution Stability</h3>
+            <Tooltip text="Spearman rank correlation of SHAP feature importances under small input perturbations (5 runs, 5% noise). High (>= 0.85) means the top-3 ranking is robust. Low (<= 0.6) means the explanation is sensitive to minor input variations." />
+          </div>
+          <div className={`inline-flex items-center gap-2 text-xs rounded px-2 py-1 ${
+            stabilityScore >= 0.85 ? 'bg-green-900/40 text-green-300'
+            : stabilityScore >= 0.6 ? 'bg-yellow-900/40 text-yellow-300'
+            : 'bg-red-900/40 text-red-300'
+          }`}>
+            <span>{stabilityScore.toFixed(3)}</span>
+            <span className="text-gray-500">
+              {stabilityScore >= 0.85 ? '(stable)' : stabilityScore >= 0.6 ? '(moderate)' : '(unstable)'}
+            </span>
+          </div>
+        </div>
+      )}
+
       {/* LLM Explanation */}
       <div>
         <div className="flex items-center justify-between mb-2">
@@ -143,7 +215,7 @@ export default function AlertDetail({ transaction }) {
         </div>
 
         {loadingExplain && (
-          <p className="text-sm text-gray-400 italic animate-pulse">Calling LLM (v2 constrained prompt)...</p>
+          <p className="text-sm text-gray-400 italic animate-pulse">Calling LLM (v2 constrained prompt - attribution-grounded)...</p>
         )}
 
         {explainError && (

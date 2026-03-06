@@ -26,6 +26,7 @@ from src.models.shap_utils import (
     build_explainer, compute_shap_values, get_feature_cols, top_k_features,
 )
 from src.explainability.llm_explainer import generate_explanation
+from src.explainability.template_explainer import generate_template_explanation
 from src.explainability.faithfulness_eval import compute_faithfulness, evaluate_batch
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -137,40 +138,71 @@ def main():
     model, test_df, feature_cols, threshold = load_model_and_data()
     records = build_eval_records(model, test_df, feature_cols, threshold)
 
-    log.info("Generating v1 explanations (unconstrained) ...")
+    # Template baseline (deterministic, no LLM)
+    log.info("Generating template (non-LLM baseline) explanations ...")
+    template_results = []
+    for rec in records:
+        exp = generate_template_explanation(rec["score"], rec["top_features"])
+        template_results.append({**rec, "explanation": exp})
+
+    log.info("Generating v1 explanations (unconstrained LLM) ...")
     v1_results = run_generation_batch(records, "v1")
 
-    log.info("Generating v2 explanations (constrained) ...")
+    log.info("Generating v2 explanations (constrained LLM) ...")
     v2_results = run_generation_batch(records, "v2")
 
-    # Score faithfulness
+    # Score faithfulness for all three
+    template_batch = [{"explanation": r["explanation"], "top_features": r["top_features"]} for r in template_results]
     v1_batch = [{"explanation": r["explanation"], "top_features": r["top_features"]} for r in v1_results]
     v2_batch = [{"explanation": r["explanation"], "top_features": r["top_features"]} for r in v2_results]
 
+    template_summary = evaluate_batch(template_batch, "v2")  # evaluate with same metrics as v2
     v1_summary = evaluate_batch(v1_batch, "v1")
     v2_summary = evaluate_batch(v2_batch, "v2")
 
-    # Print results
-    log.info("=" * 55)
-    log.info(f"{'Metric':<35} {'v1':>8} {'v2':>8}")
-    log.info("=" * 55)
+    # Print comparison table
+    log.info("=" * 75)
+    log.info(f"{'Metric':<35} {'template':>10} {'v1':>10} {'v2':>10}")
+    log.info("=" * 75)
     for label, key in [
         ("mention_rate",           "mean_mention_rate"),
         ("direction_accuracy",     "mean_direction_accuracy"),
         ("value_accuracy",         "mean_value_accuracy"),
+        ("rank_fidelity",          "mean_rank_fidelity"),
         ("hallucination_rate",     "hallucination_rate"),
         ("composite_faithfulness", "mean_composite_faithfulness"),
     ]:
+        tv = template_summary.get(key)
         v1v = v1_summary.get(key)
         v2v = v2_summary.get(key)
-        log.info(f"  {label:<33} {str(round(v1v,3) if v1v else 'N/A'):>8} {str(round(v2v,3) if v2v else 'N/A'):>8}")
+        fmt = lambda x: str(round(x, 3)) if x is not None else "N/A"
+        log.info(f"  {label:<33} {fmt(tv):>10} {fmt(v1v):>10} {fmt(v2v):>10}")
+
+    log.info("")
+    log.info("Failure type counts (v1 vs v2 vs template):")
+    all_failure_types = set()
+    for s in (template_summary, v1_summary, v2_summary):
+        all_failure_types.update(s.get("failure_type_counts", {}).keys())
+    for ft in sorted(all_failure_types):
+        tc = template_summary.get("failure_type_counts", {}).get(ft, 0)
+        v1c = v1_summary.get("failure_type_counts", {}).get(ft, 0)
+        v2c = v2_summary.get("failure_type_counts", {}).get(ft, 0)
+        log.info(f"  {ft:<35} {tc:>10} {v1c:>10} {v2c:>10}")
 
     # Save full results
     output = {
-        "v1": {"summary": {k: v for k, v in v1_summary.items() if k != "individual"},
-               "results": v1_results},
-        "v2": {"summary": {k: v for k, v in v2_summary.items() if k != "individual"},
-               "results": v2_results},
+        "template": {
+            "summary": {k: v for k, v in template_summary.items() if k != "individual"},
+            "results": template_results,
+        },
+        "v1": {
+            "summary": {k: v for k, v in v1_summary.items() if k != "individual"},
+            "results": v1_results,
+        },
+        "v2": {
+            "summary": {k: v for k, v in v2_summary.items() if k != "individual"},
+            "results": v2_results,
+        },
     }
     OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
     with open(OUTPUT_PATH, "w") as f:

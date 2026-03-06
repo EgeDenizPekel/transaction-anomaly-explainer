@@ -200,3 +200,147 @@ def test_retrain_status_idle_at_startup(client):
     data = r.json()
     assert "running" in data
     assert data["running"] is False
+
+
+# ---------------------------------------------------------------------------
+# GET /batch-metrics
+# ---------------------------------------------------------------------------
+
+def test_batch_metrics_returns_list(client):
+    r = client.get("/batch-metrics")
+    assert r.status_code == 200
+    assert isinstance(r.json(), list)
+
+
+def test_batch_metrics_schema(client):
+    """If any batch metrics exist, each entry must have required fields."""
+    data = client.get("/batch-metrics").json()
+    for entry in data:
+        for field in ["batch_id", "is_post_drift", "f1", "fraud_rate",
+                      "n_transactions", "drift_detected", "drifted_features", "recorded_at"]:
+            assert field in entry, f"Missing field: {field}"
+
+
+# ---------------------------------------------------------------------------
+# GET /drift-history
+# ---------------------------------------------------------------------------
+
+def test_drift_history_returns_list(client):
+    r = client.get("/drift-history")
+    assert r.status_code == 200
+    assert isinstance(r.json(), list)
+
+
+def test_drift_history_schema(client):
+    """If any drift events exist, each entry must have required fields."""
+    data = client.get("/drift-history").json()
+    for entry in data:
+        for field in ["batch_id", "is_post_drift", "drift_detected",
+                      "drifted_features", "psi_scores", "checked_at"]:
+            assert field in entry, f"Missing field: {field}"
+
+
+# ---------------------------------------------------------------------------
+# GET /calibration
+# ---------------------------------------------------------------------------
+
+def test_calibration_returns_200_or_503(client):
+    """Calibration requires val parquet with isFraud column. Accept 200 or 503."""
+    r = client.get("/calibration")
+    assert r.status_code in (200, 503), f"Unexpected status {r.status_code}: {r.text}"
+
+
+def test_calibration_schema(client):
+    r = client.get("/calibration")
+    if r.status_code == 200:
+        data = r.json()
+        for field in ["brier_score", "baseline_brier", "n_val_samples", "reliability_diagram"]:
+            assert field in data, f"Missing field: {field}"
+        assert 0.0 <= data["brier_score"] <= 1.0
+        assert 0.0 <= data["baseline_brier"] <= 0.25
+        assert isinstance(data["reliability_diagram"], list)
+        for bin_entry in data["reliability_diagram"]:
+            for field in ["mean_predicted", "actual_rate", "count"]:
+                assert field in bin_entry
+
+
+# ---------------------------------------------------------------------------
+# GET /explanation-drift
+# ---------------------------------------------------------------------------
+
+def test_explanation_drift_returns_list(client):
+    r = client.get("/explanation-drift")
+    assert r.status_code == 200
+    assert isinstance(r.json(), list)
+
+
+def test_explanation_drift_schema(client):
+    data = client.get("/explanation-drift").json()
+    for entry in data:
+        for field in ["batch_id", "is_post_drift", "top_feature_counts", "n_flagged", "recorded_at"]:
+            assert field in entry, f"Missing field: {field}"
+        assert isinstance(entry["top_feature_counts"], dict)
+
+
+# ---------------------------------------------------------------------------
+# POST /score - counterfactuals and stability flags
+# ---------------------------------------------------------------------------
+
+def test_score_counterfactuals_flag(client):
+    """compute_counterfactuals=True should not crash and returns list."""
+    r = client.post("/score", json={
+        "transaction_id": "test_cf",
+        "features": {"TransactionAmt": 50000.0, "txn_velocity_1h": 20.0, "is_new_device": 1.0},
+        "generate_explanation": False,
+        "compute_counterfactuals": True,
+    })
+    assert r.status_code == 200
+    data = r.json()
+    assert "counterfactuals" in data
+    assert isinstance(data["counterfactuals"], list)
+
+
+def test_score_stability_flag(client):
+    """compute_stability=True on a flagged transaction should return a float or None."""
+    r = client.post("/score", json={
+        "transaction_id": "test_stability",
+        "features": {"TransactionAmt": 50000.0, "txn_velocity_1h": 20.0, "is_new_device": 1.0},
+        "generate_explanation": False,
+        "compute_stability": True,
+    })
+    assert r.status_code == 200
+    data = r.json()
+    assert "stability_score" in data
+    if data["stability_score"] is not None:
+        assert 0.0 <= data["stability_score"] <= 1.0
+
+
+# ---------------------------------------------------------------------------
+# POST /explain
+# ---------------------------------------------------------------------------
+
+def test_explain_returns_200_or_503(client):
+    """
+    /explain calls the LLM which may not be available in the test environment.
+    Accept 200 (LLM available) or 503 (LLM unavailable). Never 422 (schema error).
+    """
+    payload = {
+        "transaction_id": "test_explain",
+        "anomaly_score": 0.92,
+        "top_features": [
+            {"feature": "card1", "shap_value": 1.08, "feature_value": 0.034,
+             "direction": "increases_risk"},
+            {"feature": "C1", "shap_value": 0.73, "feature_value": 9.0,
+             "direction": "increases_risk"},
+            {"feature": "time_since_last_txn", "shap_value": -0.33, "feature_value": 86400.0,
+             "direction": "decreases_risk"},
+        ],
+    }
+    r = client.post("/explain", json=payload)
+    assert r.status_code in (200, 503), f"Unexpected status {r.status_code}: {r.text}"
+    if r.status_code == 200:
+        data = r.json()
+        assert "transaction_id" in data
+        assert "explanation" in data
+        assert isinstance(data["explanation"], str)
+        assert len(data["explanation"]) > 0

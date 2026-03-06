@@ -25,8 +25,18 @@ class TransactionRequest(BaseModel):
     )
     generate_explanation: bool = Field(
         default=True,
-        description="Whether to call the LLM for a natural-language explanation. "
+        description="Whether to call the LLM for a natural-language summary of model attribution signals. "
                     "Set False to get a score-only response with lower latency.",
+    )
+    compute_counterfactuals: bool = Field(
+        default=False,
+        description="If True, compute single-feature counterfactuals for flagged transactions. "
+                    "Adds latency (~30-100ms per flagged transaction).",
+    )
+    compute_stability: bool = Field(
+        default=False,
+        description="If True, compute SHAP attribution stability score for flagged transactions. "
+                    "Adds latency (~50-200ms per flagged transaction).",
     )
 
 
@@ -35,6 +45,14 @@ class TopFeature(BaseModel):
     shap_value: float
     feature_value: float
     direction: str  # "increases_risk" | "decreases_risk"
+
+
+class CounterfactualFeature(BaseModel):
+    feature: str
+    current_value: float
+    counterfactual_value: float
+    score_after: float
+    pct_change: float  # % change from current to counterfactual value
 
 
 class ScoreResponse(BaseModel):
@@ -46,6 +64,8 @@ class ScoreResponse(BaseModel):
     explanation: str | None
     model_version: str
     latency_ms: float
+    stability_score: float | None = None
+    counterfactuals: list[CounterfactualFeature] = []
 
 
 # ---------------------------------------------------------------------------
@@ -61,6 +81,8 @@ class TransactionRecord(BaseModel):
     timestamp_dt: float | None  # TransactionDT value if provided
     top_features: list[TopFeature] = []
     explanation: str | None = None
+    counterfactuals: list[CounterfactualFeature] = []
+    stability_score: float | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -70,10 +92,30 @@ class TransactionRecord(BaseModel):
 class MetricsResponse(BaseModel):
     model_version: str
     val_roc_auc: float | None
+    val_brier_score: float | None = None
     n_transactions_scored: int
     n_flagged: int
     flag_rate: float
     drift_detected: bool
+
+
+# ---------------------------------------------------------------------------
+# GET /calibration
+# ---------------------------------------------------------------------------
+
+class CalibrationBin(BaseModel):
+    mean_predicted: float
+    actual_rate: float
+    count: int
+    bin_lower: float
+    bin_upper: float
+
+
+class CalibrationResponse(BaseModel):
+    brier_score: float
+    baseline_brier: float  # naive predictor: base_rate * (1 - base_rate)
+    n_val_samples: int
+    reliability_diagram: list[CalibrationBin]
 
 
 # ---------------------------------------------------------------------------
@@ -122,8 +164,22 @@ class BatchMetric(BaseModel):
     f1: float
     fraud_rate: float
     n_transactions: int
+    n_flagged_batch: int = 0
     drift_detected: bool
     drifted_features: list[str]
+    top_feature_counts: dict[str, int] = {}
+    recorded_at: str
+
+
+# ---------------------------------------------------------------------------
+# GET /explanation-drift
+# ---------------------------------------------------------------------------
+
+class ExplanationDriftEvent(BaseModel):
+    batch_id: int
+    is_post_drift: bool
+    top_feature_counts: dict[str, int]
+    n_flagged: int
     recorded_at: str
 
 
